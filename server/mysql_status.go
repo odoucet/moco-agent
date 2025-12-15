@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -182,4 +184,79 @@ WHERE VARIABLE_NAME='Uptime'`)
 	}
 	uptime = time.Second * time.Duration(uptime_seconds)
 	return
+}
+
+// StopReplicationAndDisableReadOnly stops all replication and disables read_only mode.
+// This is used to recover a crashed primary that still has stale replication configuration.
+func (a *Agent) StopReplicationAndDisableReadOnly(ctx context.Context) error {
+	// Stop replica if it's running
+	if _, err := a.db.ExecContext(ctx, `STOP REPLICA`); err != nil {
+		// Ignore errors if replica is not running
+		a.logger.Info("stop replica returned error (may be expected)", "error", err)
+	}
+
+	// Reset replica configuration to clear stale settings
+	if _, err := a.db.ExecContext(ctx, `RESET REPLICA ALL`); err != nil {
+		return fmt.Errorf("failed to reset replica: %w", err)
+	}
+
+	// Disable read_only mode
+	if _, err := a.db.ExecContext(ctx, `SET GLOBAL read_only=OFF`); err != nil {
+		return fmt.Errorf("failed to disable read_only: %w", err)
+	}
+
+	a.logger.Info("successfully stopped replication and disabled read_only for primary recovery")
+	return nil
+}
+
+// StorePrimaryIndex stores the current pod index as the primary index in a file.
+// This allows detecting if this pod was the previous primary after a crash/restart.
+func (a *Agent) StorePrimaryIndex(ctx context.Context, podIndex int) error {
+	// Store in /var/log/mysql which is persistent
+	metadataFile := "/var/log/mysql/moco_primary_index"
+	
+	err := os.WriteFile(metadataFile, []byte(fmt.Sprintf("%d", podIndex)), 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write primary index file: %w", err)
+	}
+
+	a.logger.Info("stored primary index", "podIndex", podIndex, "file", metadataFile)
+	return nil
+}
+
+// GetStoredPrimaryIndex retrieves the stored primary index from the filesystem.
+// Returns -1 if no primary index is stored, or an error if the read fails.
+func (a *Agent) GetStoredPrimaryIndex(ctx context.Context) (int, error) {
+	metadataFile := "/var/log/mysql/moco_primary_index"
+	
+	data, err := os.ReadFile(metadataFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No primary index stored yet
+			return -1, nil
+		}
+		return -1, fmt.Errorf("failed to read primary index file: %w", err)
+	}
+
+	value := strings.TrimSpace(string(data))
+	index, err := strconv.Atoi(value)
+	if err != nil {
+		return -1, fmt.Errorf("invalid primary index value in file: %w", err)
+	}
+
+	return index, nil
+}
+
+// ClearPrimaryIndex removes the stored primary index from the filesystem.
+// This should be called when a pod transitions from primary to replica.
+func (a *Agent) ClearPrimaryIndex(ctx context.Context) error {
+	metadataFile := "/var/log/mysql/moco_primary_index"
+	
+	err := os.Remove(metadataFile)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove primary index file: %w", err)
+	}
+
+	a.logger.Info("cleared stored primary index")
+	return nil
 }

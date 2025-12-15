@@ -44,6 +44,10 @@ func (a *Agent) MySQLDReady(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !globalVariables.ReadOnly {
+		// Pod is currently primary - store the primary index
+		if storeErr := a.StorePrimaryIndex(r.Context(), a.podIndex); storeErr != nil {
+			a.logger.Error(storeErr, "failed to store primary index")
+		}
 		a.configureReplicationMetrics(false)
 		metrics.UnregisterReplicationMetrics(prometheus.DefaultRegisterer)
 		return
@@ -60,12 +64,60 @@ func (a *Agent) MySQLDReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if replicaStatus.ReplicaIORunning != "Yes" || replicaStatus.ReplicaSQLRunning != "Yes" {
+		// Check if this pod was previously the primary
+		storedPrimaryIndex, getErr := a.GetStoredPrimaryIndex(r.Context())
+		if getErr != nil {
+			a.logger.Error(getErr, "failed to get stored primary index")
+		} else if storedPrimaryIndex >= 0 && storedPrimaryIndex == a.podIndex {
+			// This pod was previously the primary and now has stopped replication threads
+			// This indicates a crashed primary that needs recovery
+			a.logger.Info("detected crashed primary with stopped replication, attempting recovery",
+				"currentPodIndex", a.podIndex,
+				"storedPrimaryIndex", storedPrimaryIndex)
+			
+			if recoverErr := a.StopReplicationAndDisableReadOnly(r.Context()); recoverErr != nil {
+				a.logger.Error(recoverErr, "failed to recover crashed primary")
+				msg := fmt.Sprintf("failed to recover crashed primary: %+v", recoverErr)
+				http.Error(w, msg, http.StatusInternalServerError)
+				return
+			}
+			
+			// Successfully recovered - clear the stored index and return ready
+			a.ClearPrimaryIndex(r.Context())
+			return
+		}
+		
 		a.logger.Info("replication threads are stopped")
 		http.Error(w, "replication thread are stopped", http.StatusServiceUnavailable)
 		return
 	}
 
 	if replicaStatus.LastIOErrno != 0 || replicaStatus.LastSQLErrno != 0 {
+		// Check if this pod was previously the primary
+		storedPrimaryIndex, getErr := a.GetStoredPrimaryIndex(r.Context())
+		if getErr != nil {
+			a.logger.Error(getErr, "failed to get stored primary index")
+		} else if storedPrimaryIndex >= 0 && storedPrimaryIndex == a.podIndex {
+			// This pod was previously the primary and now has replication errors
+			// This indicates a crashed primary that needs recovery
+			a.logger.Info("detected crashed primary with replication errors, attempting recovery",
+				"currentPodIndex", a.podIndex,
+				"storedPrimaryIndex", storedPrimaryIndex,
+				"Last_IO_Errno", replicaStatus.LastIOErrno,
+				"Last_SQL_Errno", replicaStatus.LastSQLErrno)
+			
+			if recoverErr := a.StopReplicationAndDisableReadOnly(r.Context()); recoverErr != nil {
+				a.logger.Error(recoverErr, "failed to recover crashed primary")
+				msg := fmt.Sprintf("failed to recover crashed primary: %+v", recoverErr)
+				http.Error(w, msg, http.StatusInternalServerError)
+				return
+			}
+			
+			// Successfully recovered - clear the stored index and return ready
+			a.ClearPrimaryIndex(r.Context())
+			return
+		}
+		
 		a.logger.Info("the instance has replication error(s)",
 			"Last_IO_Errno", replicaStatus.LastIOErrno,
 			"Last_IO_Error", replicaStatus.LastIOError,
