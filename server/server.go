@@ -22,7 +22,7 @@ type agentService struct {
 }
 
 // New returns an Agent
-func New(config MySQLAccessorConfig, clusterName, socket, logDir string, maxDelay, transactionQueueingWait time.Duration, podIndex int, logger logr.Logger) (*Agent, error) {
+func New(config MySQLAccessorConfig, clusterName, socket, logDir string, maxDelay, transactionQueueingWait time.Duration, logger logr.Logger) (*Agent, error) {
 	db, err := getMySQLConn(config)
 	if err != nil {
 		return nil, err
@@ -36,7 +36,6 @@ func New(config MySQLAccessorConfig, clusterName, socket, logDir string, maxDela
 		logDir:                  logDir,
 		maxDelayThreshold:       maxDelay,
 		transactionQueueingWait: transactionQueueingWait,
-		podIndex:                podIndex,
 		cloneLock:               make(chan struct{}, 1),
 	}, nil
 }
@@ -50,7 +49,6 @@ type Agent struct {
 	logDir                  string
 	maxDelayThreshold       time.Duration
 	transactionQueueingWait time.Duration
-	podIndex                int
 
 	cloneLock    chan struct{}
 	registryLock sync.Mutex
