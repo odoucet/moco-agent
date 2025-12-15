@@ -60,12 +60,41 @@ func (a *Agent) MySQLDReady(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if replicaStatus.ReplicaIORunning != "Yes" || replicaStatus.ReplicaSQLRunning != "Yes" {
+		// If this is pod index 0 (primary candidate) and replication threads are stopped,
+		// this might be a crashed primary that needs recovery
+		if a.podIndex == 0 {
+			a.logger.Info("pod index 0 with stopped replication threads, attempting primary recovery")
+			if recoverErr := a.StopReplicationAndDisableReadOnly(r.Context()); recoverErr != nil {
+				a.logger.Error(recoverErr, "failed to recover as primary")
+				msg := fmt.Sprintf("failed to recover as primary: %+v", recoverErr)
+				http.Error(w, msg, http.StatusInternalServerError)
+				return
+			}
+			// Successfully recovered, now ready as primary
+			return
+		}
 		a.logger.Info("replication threads are stopped")
 		http.Error(w, "replication thread are stopped", http.StatusServiceUnavailable)
 		return
 	}
 
 	if replicaStatus.LastIOErrno != 0 || replicaStatus.LastSQLErrno != 0 {
+		// If this is pod index 0 (primary candidate) and there are replication errors,
+		// this might be a crashed primary that needs recovery
+		if a.podIndex == 0 {
+			a.logger.Info("pod index 0 with replication errors, attempting primary recovery",
+				"Last_IO_Errno", replicaStatus.LastIOErrno,
+				"Last_SQL_Errno", replicaStatus.LastSQLErrno,
+			)
+			if recoverErr := a.StopReplicationAndDisableReadOnly(r.Context()); recoverErr != nil {
+				a.logger.Error(recoverErr, "failed to recover as primary")
+				msg := fmt.Sprintf("failed to recover as primary: %+v", recoverErr)
+				http.Error(w, msg, http.StatusInternalServerError)
+				return
+			}
+			// Successfully recovered, now ready as primary
+			return
+		}
 		a.logger.Info("the instance has replication error(s)",
 			"Last_IO_Errno", replicaStatus.LastIOErrno,
 			"Last_IO_Error", replicaStatus.LastIOError,

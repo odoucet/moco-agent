@@ -183,3 +183,26 @@ WHERE VARIABLE_NAME='Uptime'`)
 	uptime = time.Second * time.Duration(uptime_seconds)
 	return
 }
+
+// StopReplicationAndDisableReadOnly stops all replication and disables read_only mode.
+// This is used to recover a crashed primary that still has stale replication configuration.
+func (a *Agent) StopReplicationAndDisableReadOnly(ctx context.Context) error {
+	// Stop replica if it's running
+	if _, err := a.db.ExecContext(ctx, `STOP REPLICA`); err != nil {
+		// Ignore errors if replica is not running
+		a.logger.Info("stop replica returned error (may be expected)", "error", err)
+	}
+
+	// Reset replica configuration to clear stale settings
+	if _, err := a.db.ExecContext(ctx, `RESET REPLICA ALL`); err != nil {
+		return fmt.Errorf("failed to reset replica: %w", err)
+	}
+
+	// Disable read_only mode
+	if _, err := a.db.ExecContext(ctx, `SET GLOBAL read_only=OFF`); err != nil {
+		return fmt.Errorf("failed to disable read_only: %w", err)
+	}
+
+	a.logger.Info("successfully stopped replication and disabled read_only for primary recovery")
+	return nil
+}
