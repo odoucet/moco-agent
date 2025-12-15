@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -204,5 +205,78 @@ func (a *Agent) StopReplicationAndDisableReadOnly(ctx context.Context) error {
 	}
 
 	a.logger.Info("successfully stopped replication and disabled read_only for primary recovery")
+	return nil
+}
+
+// StorePrimaryIndex stores the current pod index as the primary index in MySQL.
+// This allows detecting if this pod was the previous primary after a crash/restart.
+func (a *Agent) StorePrimaryIndex(ctx context.Context, podIndex int) error {
+	// Ensure the moco metadata table exists
+	_, err := a.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS mysql.moco_metadata (
+			meta_key VARCHAR(255) PRIMARY KEY,
+			meta_value TEXT NOT NULL,
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+		) ENGINE=InnoDB
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to create moco_metadata table: %w", err)
+	}
+
+	// Store the primary index
+	_, err = a.db.ExecContext(ctx, `
+		INSERT INTO mysql.moco_metadata (meta_key, meta_value)
+		VALUES ('primary_index', ?)
+		ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)
+	`, fmt.Sprintf("%d", podIndex))
+	if err != nil {
+		return fmt.Errorf("failed to store primary index: %w", err)
+	}
+
+	a.logger.Info("stored primary index", "podIndex", podIndex)
+	return nil
+}
+
+// GetStoredPrimaryIndex retrieves the stored primary index from MySQL.
+// Returns -1 if no primary index is stored, or an error if the query fails.
+func (a *Agent) GetStoredPrimaryIndex(ctx context.Context) (int, error) {
+	var value string
+	err := a.db.GetContext(ctx, &value, `
+		SELECT meta_value FROM mysql.moco_metadata WHERE meta_key = 'primary_index'
+	`)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No primary index stored yet
+			return -1, nil
+		}
+		// Check if table doesn't exist (ignore this error)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "Table 'mysql.moco_metadata' doesn't exist") ||
+		   strings.Contains(errMsg, "doesn't exist") {
+			return -1, nil
+		}
+		return -1, fmt.Errorf("failed to get stored primary index: %w", err)
+	}
+
+	index, err := strconv.Atoi(value)
+	if err != nil {
+		return -1, fmt.Errorf("invalid primary index value: %w", err)
+	}
+
+	return index, nil
+}
+
+// ClearPrimaryIndex removes the stored primary index from MySQL.
+// This should be called when a pod transitions from primary to replica.
+func (a *Agent) ClearPrimaryIndex(ctx context.Context) error {
+	_, err := a.db.ExecContext(ctx, `
+		DELETE FROM mysql.moco_metadata WHERE meta_key = 'primary_index'
+	`)
+	if err != nil {
+		// Ignore error if table doesn't exist
+		return nil
+	}
+
+	a.logger.Info("cleared stored primary index")
 	return nil
 }

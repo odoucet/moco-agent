@@ -75,7 +75,7 @@ var _ = Describe("clone", func() {
 			ConnectionTimeout: 3 * time.Second,
 			ReadTimeout:       30 * time.Second,
 		}
-		agent, err := New(conf, testClusterName, sockFile, "", 100*time.Millisecond, time.Second, testLogger)
+		agent, err := New(conf, testClusterName, sockFile, "", 100*time.Millisecond, time.Second, 0, testLogger)
 
 		Expect(err).ShouldNot(HaveOccurred())
 		defer agent.CloseDB()

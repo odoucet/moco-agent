@@ -116,7 +116,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		agent, err := server.New(conf, clusterName, config.socketPath, mocoagent.VarLogPath,
-			config.maxDelayThreshold, config.transactionQueueingWait, rLogger.WithName("agent"))
+			config.maxDelayThreshold, config.transactionQueueingWait, index, rLogger.WithName("agent"))
 		if err != nil {
 			return err
 		}
